@@ -1,11 +1,26 @@
-# billing-system
+# Billing System
+
+Мини-система биллинга с поддержкой транзакций и управления балансом клиента.
+
+## Описание проекта
+
+Система предоставляет API для работы с финансовыми операциями:
+- Конвертация валюты (RUB ↔ USD)
+- Покупка услуг
+- Пополнение счета
+
+**Стек технологий:**
+- Python 3.12
+- Django 4.2
+- Django REST Framework
+- SQLite (для разработки)
 
 ## Инициализация проекта
 
 ### Требования
 
 - Python 3.12 или выше
-- [uv](https://github.com/astral-sh/uv) (быстрый менеджер пакетов Python)
+- [uv](https://github.com/astral-sh/uv)
 
 ### Установка uv
 
@@ -88,3 +103,232 @@ python manage.py runserver
 - Команды `init_currencies` и `init_balances` используют `get_or_create`, поэтому их можно запускать многократно без создания дубликатов
 - Команду `init_balances` нужно запускать после `init_currencies`, так как балансы создаются для существующих валют
 - Для production окружения рекомендуется использовать PostgreSQL или другую production-ready базу данных
+
+---
+
+## Модели данных
+
+### Currency (Валюта)
+Справочник валют системы.
+
+```python
+- code: CharField (PK) - Код валюты (например, "USD", "RUB")
+- name: CharField - Название валюты
+```
+
+### Balance (Баланс)
+Хранит баланс для каждой валюты.
+
+```python
+- amount: DecimalField(20, 2) - Сумма на балансе
+- currency: ForeignKey(Currency) - Валюта баланса
+```
+
+**Методы:**
+- `deposit(amount)` - Пополнение баланса
+- `withdraw(amount)` - Списание с баланса
+- `check_sufficient_balance(amount)` - Проверка достаточности средств
+
+### Transaction (Транзакция)
+Записи о всех финансовых операциях.
+
+```python
+- transaction_type: CharField - Тип транзакции (conversion, service_spend, account_topup)
+- amount: DecimalField(20, 5) - Сумма операции
+- currency: ForeignKey(Currency) - Валюта операции
+- gross_currency: ForeignKey(Currency, nullable) - Исходная валюта (для конвертации)
+- exchange_rate: DecimalField(35, 16, nullable) - Обменный курс
+- user: ForeignKey(User, nullable) - Пользователь
+- created_at: DateTimeField - Дата и время создания
+```
+
+---
+
+## API Эндпоинты
+
+### 1. Конвертация валюты
+
+**Эндпоинт:** `POST /api/transactions/conversion/`
+
+**Описание:** Конвертирует валюту между RUB и USD с обновлением балансов.
+
+**Обязательные поля:** `sum`, `currency_id`, `gross_currency_id`, `exchange_rate`
+
+**Пример (RUB → USD):**
+```bash
+curl -X POST http://localhost:8000/api/transactions/conversion/ \
+  -H "Content-Type: application/json" \
+  -d '{"sum": "100", "currency_id": "USD", "gross_currency_id": "RUB", "exchange_rate": "85.0"}'
+```
+
+**Логика:** Списывает средства с исходной валюты, начисляет на целевую. Проверяет достаточность средств. Работает в транзакции БД с блокировкой записей.
+
+### 2. Покупка услуги
+
+**Эндпоинт:** `POST /api/transactions/service-spend/`
+
+**Описание:** Списывает средства за покупку услуги. Все услуги продаются в RUB.
+
+**Обязательные поля:** `sum`, `currency_id` (+ `gross_currency_id` и `exchange_rate` для не-RUB)
+
+**Пример:**
+```bash
+curl -X POST http://localhost:8000/api/transactions/service-spend/ \
+  -H "Content-Type: application/json" \
+  -d '{"sum": "1000", "currency_id": "RUB"}'
+```
+
+**Логика:** Списывает с RUB баланса. Для операций не в RUB выполняется встроенная конвертация (`sum × exchange_rate`).
+
+### 3. Пополнение счета
+
+**Эндпоинт:** `POST /api/transactions/account-topup/`
+
+**Описание:** Пополняет баланс. Все пополнения идут в RUB.
+
+**Обязательные поля:** `sum`, `currency_id` (+ `gross_currency_id` и `exchange_rate` для не-RUB)
+
+**Пример:**
+```bash
+curl -X POST http://localhost:8000/api/transactions/account-topup/ \
+  -H "Content-Type: application/json" \
+  -d '{"sum": "5000", "currency_id": "RUB"}'
+```
+
+**Логика:** Начисляет на RUB баланс. Для операций не в RUB выполняется встроенная конвертация (`sum × exchange_rate`).
+
+---
+
+## Валидация данных
+
+Все эндпоинты выполняют следующие проверки:
+
+### Валидация полей
+- **sum**: обязательно, должно быть > 0, корректное Decimal значение
+- **exchange_rate**: должно быть > 0 (если указано), корректное Decimal значение
+- **currency_id / gross_currency_id**:
+  - Не чувствительны к регистру (rub, RUB → RUB)
+  - Должны существовать в БД
+  - Должны быть разными (при конвертации)
+
+### Бизнес-логика
+- Проверка достаточности средств перед списанием
+- Атомарность транзакций (через `transaction.atomic()`)
+- Блокировка балансов при обновлении (`select_for_update()`)
+- Обязательность `gross_currency_id` и `exchange_rate` для операций не в RUB
+
+---
+
+## Реализованный функционал
+
+### ✅ Модели
+- [x] Модель `Currency` с кодом валюты как Primary Key
+- [x] Модель `Balance` с поддержкой методов `deposit()`, `withdraw()`, `check_sufficient_balance()`
+- [x] Модель `Transaction` со всеми необходимыми полями
+- [x] Связь с моделью `User` (опционально)
+
+### ✅ API
+- [x] Эндпоинт конвертации валюты (`/api/transactions/conversion/`)
+- [x] Эндпоинт покупки услуги (`/api/transactions/service-spend/`)
+- [x] Эндпоинт пополнения счета (`/api/transactions/account-topup/`)
+- [x] Поддержка конвертации RUB ↔ USD
+- [x] Встроенная конвертация для операций не в RUB
+
+### ✅ Валидация
+- [x] Проверка корректности сумм и обменных курсов
+- [x] Валидация существования валют
+- [x] Проверка различия валют при конвертации
+- [x] Нечувствительность к регистру кодов валют
+- [x] Проверка достаточности средств
+
+### ✅ Безопасность и надежность
+- [x] Атомарные транзакции БД
+- [x] Блокировка записей при обновлении балансов
+- [x] Обработка ошибок с понятными сообщениями
+- [x] Использование Decimal для финансовых расчетов
+
+### ✅ Архитектура
+- [x] Базовый класс `BaseTransactionView` для переиспользования кода
+- [x] Отдельные сериализаторы для каждого типа транзакции
+- [x] DRY принцип (отсутствие дублирования кода)
+- [x] Management commands для инициализации данных
+
+### ✅ Документация
+- [x] README с инструкциями по установке
+- [x] Описание моделей данных
+- [x] Документация API с примерами
+- [x] Примеры curl запросов
+
+---
+
+## Нереализованный функционал
+
+### ✅ Тесты
+- [x] Тесты API эндпоинтов (18 тестов)
+  - [x] Конвертация валюты (9 тестов)
+  - [x] Покупка услуг (5 тестов)
+  - [x] Пополнение счета (4 теста)
+- [x] Unit-тесты для методов моделей (16 тестов)
+  - [x] Balance: deposit, withdraw, check_sufficient_balance (9 тестов)
+  - [x] Transaction: создание, отображение типов (4 теста)
+  - [x] Currency: создание, уникальность (3 теста)
+
+---
+
+
+
+## Обработка ошибок
+
+### Недостаточно средств
+```json
+{
+  "error": "Недостаточно средств. Доступно: 1000.00 RUB"
+}
+```
+
+### Некорректная сумма
+```json
+{
+  "sum": ["Сумма должна быть больше 0"]
+}
+```
+
+### Несуществующая валюта
+```json
+{
+  "currency_id": ["Валюта EUR не поддерживается"]
+}
+```
+
+### Одинаковые валюты при конвертации
+```json
+{
+  "non_field_errors": ["Валюты конвертации должны быть разными"]
+}
+```
+
+---
+
+
+## Тестирование
+
+**34 автоматических теста** (pytest + pytest-django) покрывают API и модели.
+
+```bash
+# Запуск всех тестов
+pytest
+
+# С подробным выводом
+pytest -v
+
+# Конкретная категория
+pytest billing/tests/test_models.py -v
+```
+
+**Покрытие:**
+- **API тесты (18):** Conversion, Service Spend, Account Top-Up
+- **Model тесты (16):** Balance методы, Transaction, Currency
+
+Подробнее: `TESTING.md`
+
+---
